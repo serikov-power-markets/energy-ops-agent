@@ -12,6 +12,7 @@ A small agent that answers questions about German hourly power data (day-ahead p
 | Agent loop | `src/eoa/agent.py` | `RulePlanner` (deterministic, no key) and `LLMPlanner` (any chat model with function calling, passed in as a callable; `providers.py` has an adapter for the Gemini REST API). Arguments are validated (dates only), unknown tools are refused, tool errors do not stop the loop |
 | Grounding check | `agent.check_grounded` | numbers in the answer must match a tool result or its rounding; otherwise the answer is replaced by a refusal that lists the numbers |
 | HTTP | `src/eoa/api.py` | `GET /report?day=`, `POST /ask`, `GET /health` (FastAPI) |
+| MCP server | `src/eoa/mcp_server.py` | the seven tools as MCP tools, the runbooks as resources (`kb://{name}`), a prompt for a grounded report, and `verify_answer`, which runs the grounding check over the tool calls of the session (see below) |
 | Workflow | `n8n/daily_energy_report.json` | schedule trigger (07:00) and a webhook trigger with `?day=`, pick the day, call `/report` with three retries, branch on `alert`, then `POST /outbox` (a local stand-in for mail) or log |
 
 ## Results
@@ -39,6 +40,21 @@ What the run showed:
 - Model names change quickly: `gemini-2.5-flash` was no longer available to this account, `gemini-3.8-flash` answered 503 on every attempt, and `gemini-3-flash-preview` ran out of free quota after six questions. The adapter retries on 429, 500 and 503 and on timeouts.
 - Limits: 12 questions, one run each, answers of a model vary between runs.
 
+## MCP server (24 November 2026)
+
+The same tools are available to any client that speaks the Model Context Protocol (official Python SDK, version 2). `python -m eoa.mcp_server` starts it on stdio, `python -m eoa.mcp_server --http --port 8765` over streamable HTTP.
+
+| Item | What it is |
+|---|---|
+| Tools | `daily_summary`, `data_quality`, `price_anomalies`, `compare_days`, `wind_price_slope`, `search_kb`, `draft_notice`: the registry of `tools.py` with the same argument validation (dates only, length limit) and error results instead of crashes |
+| `verify_answer(answer)` | compares every number of a draft answer with the results of the tool calls made in the server session and returns the numbers no tool returned; `reset_session` empties the log |
+| Resources | `kb://01_residual_load` and the five other runbooks, with unknown names refused |
+| Prompt | `grounded_report(day)`: call three tools, use only their numbers, verify, stop on an error |
+
+Checked by 8 tests (`tests/test_mcp.py`): the tool list and required arguments, a tool result identical to the direct call, an error result for a bad date, `verify_answer` accepting a figure from a tool result and flagging an invented one, runbook reading, and an end-to-end run in which the server starts as a separate process and a client calls it over stdio.
+
+Limits: tested with the SDK's own client, not with a third-party chat application or a language model; the verification log is per server process, not per client connection; a model that skips `verify_answer` is not stopped (the grounding check stays inside the agent loop in `agent.py` for that); no authentication and no write tools, local use only.
+
 ## Not done
 
 - `LLMPlanner` has been run against a hosted model (below), but only on 12 questions, one run each, and the instruction text was changed after the first run, so the second result is not an independent test. No comparison of models beyond the six data questions of a second model that hit its quota.
@@ -50,7 +66,7 @@ What the run showed:
 
 ```bash
 pip install -e ".[test]"
-pytest                                  # 17 tests
+pytest                                  # 25 tests (8 for the MCP server)
 python scripts/backtest_flags.py
 uvicorn eoa.api:app --port 8000         # then GET /report?day=2024-12-12
 ```
